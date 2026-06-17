@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🎨 艺术品拍卖会实时情绪分析系统</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <h1>🎨 艺术品拍卖会情绪分析控制台</h1>
+      <div class="subtitle">Real-Time Auction Emotion Analytics Dashboard</div>
+    </div>
+    <div class="header-right">
+      <div class="connection-status" id="connStatus">
+        <span class="status-dot"></span>
+        <span id="connText">连接中...</span>
+      </div>
+      <button class="reset-btn" id="resetBtn">🔄 重置拍卖</button>
+    </div>
+  </header>
+
+  <main class="main-grid">
+    <section class="panel bid-panel">
+      <div class="panel-header">
+        <h2>💰 出价控制台</h2>
+        <div class="timer" id="timer">下一轮出价: 5s</div>
+      </div>
+      
+      <div class="current-price">
+        <div class="price-label">当前出价</div>
+        <div class="price-value" id="currentPrice">¥ 100,000</div>
+        <div class="price-change" id="priceChange">--</div>
+      </div>
+
+      <div class="last-bidder" id="lastBidder">
+        <div class="bidder-label">🏆 最新出价者</div>
+        <div class="bidder-info">等待出价...</div>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-label">轮次</div>
+          <div class="stat-value" id="roundCount">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">出价次数</div>
+          <div class="stat-value" id="bidCount">0</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">活跃竞价者</div>
+          <div class="stat-value" id="activeBidders">100</div>
+        </div>
+      </div>
+
+      <div class="manual-bid">
+        <h3>手动出价</h3>
+        <div class="bid-input-row">
+          <input type="number" id="manualBidInput" placeholder="输入出价金额">
+          <button id="manualBidBtn">确认出价</button>
+        </div>
+      </div>
+
+      <div class="recent-bids">
+        <h3>📜 最近出价记录</h3>
+        <div class="bid-list" id="bidList">
+          <div class="empty-state">暂无出价记录</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel heat-panel">
+      <div class="panel-header">
+        <h2>🔥 竞拍热度指数</h2>
+      </div>
+      
+      <div class="heat-gauge">
+        <svg viewBox="0 0 200 120" class="gauge-svg">
+          <defs>
+            <linearGradient id="gaugeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" style="stop-color:#10b981;stop-opacity:1" />
+              <stop offset="40%" style="stop-color:#f59e0b;stop-opacity:1" />
+              <stop offset="75%" style="stop-color:#ef4444;stop-opacity:1" />
+              <stop offset="100%" style="stop-color:#7c3aed;stop-opacity:1" />
+            </linearGradient>
+          </defs>
+          <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#1f2937" stroke-width="16" stroke-linecap="round"/>
+          <path id="gaugeFill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gaugeGradient)" stroke-width="16" stroke-linecap="round" stroke-dasharray="251.2" stroke-dashoffset="251.2"/>
+          <line id="gaugeNeedle" x1="100" y1="100" x2="100" y2="35" stroke="#fff" stroke-width="3" stroke-linecap="round" transform="rotate(-90 100 100)"/>
+          <circle cx="100" cy="100" r="8" fill="#fff"/>
+        </svg>
+        <div class="heat-value" id="heatValue">0</div>
+        <div class="heat-label" id="heatLabel">冷场</div>
+      </div>
+
+      <div class="emotion-breakdown">
+        <h3>😀 情绪分布</h3>
+        <div class="emotion-bars" id="emotionBars">
+          <div class="emotion-item"><span class="emotion-name">冷静 calm</span><div class="bar-wrap"><div class="bar calm-bar" style="width:0%"></div><span class="bar-count" id="calmCount">0</span></div></div>
+          <div class="emotion-item"><span class="emotion-name">投入 engaged</span><div class="bar-wrap"><div class="bar engaged-bar" style="width:0%"></div><span class="bar-count" id="engagedCount">0</span></div></div>
+          <div class="emotion-item"><span class="emotion-name">焦虑 anxious</span><div class="bar-wrap"><div class="bar anxious-bar" style="width:0%"></div><span class="bar-count" id="anxiousCount">0</span></div></div>
+          <div class="emotion-item"><span class="emotion-name">急切 desperate</span><div class="bar-wrap"><div class="bar desperate-bar" style="width:0%"></div><span class="bar-count" id="desperateCount">0</span></div></div>
+          <div class="emotion-item"><span class="emotion-name">突破 breakthrough</span><div class="bar-wrap"><div class="bar breakthrough-bar" style="width:0%"></div><span class="bar-count" id="breakthroughCount">0</span></div></div>
+          <div class="emotion-item"><span class="emotion-name">退出 exited</span><div class="bar-wrap"><div class="bar exited-bar" style="width:0%"></div><span class="bar-count" id="exitedCount">0</span></div></div>
+        </div>
+      </div>
+
+      <div class="exit-prediction">
+        <h3>⚠️ 下一个可能退出</h3>
+        <div class="exit-card" id="exitCard">
+          <div class="empty-state-sm">分析中...</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel charts-panel wide">
+      <div class="charts-row">
+        <div class="chart-box">
+          <h3>📡 多维情绪雷达图</h3>
+          <canvas id="radarChart"></canvas>
+        </div>
+        <div class="chart-box">
+          <h3>📈 价格 & 热度时间趋势</h3>
+          <canvas id="lineChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel bidders-panel wide">
+      <div class="panel-header">
+        <h2>👥 TOP 竞价者榜</h2>
+      </div>
+      <div class="bidders-grid" id="biddersGrid">
+        <div class="empty-state">暂无数据</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
