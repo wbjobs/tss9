@@ -99,6 +99,7 @@ function updateDashboard(data) {
   }
 
   updateHeatGauge(data.heatIndex);
+  updateFactorCards(data);
   updateEmotionBars(data.emotionBreakdown, data.totalBidders);
   updateExitCandidate(data.nextExitCandidate);
   updateBidList(data.recentBids);
@@ -121,6 +122,13 @@ function updateHeatGauge(heat) {
 
   const hue = 120 - (heat * 1.2);
   document.getElementById('heatValue').style.color = `hsl(${hue}, 80%, 60%)`;
+}
+
+function updateFactorCards(data) {
+  document.getElementById('momentumValue').textContent = data.cumulativeMomentum || 0;
+  document.getElementById('scarcityValue').textContent = (data.scarcityFactor || '1.000') + 'x';
+  const avg = data.allTimeAvgPrice || 100000;
+  document.getElementById('avgPriceValue').textContent = avg >= 10000 ? (avg / 10000).toFixed(1) + '万' : avg;
 }
 
 function updateEmotionBars(bd, total) {
@@ -218,10 +226,10 @@ let radarChart = null;
 function updateRadarChart(rd) {
   const ctx = document.getElementById('radarChart').getContext('2d');
   const data = {
-    labels: ['参与度', '焦虑度', '狂热值', '竞争力', '价格动能', '在场率'],
+    labels: ['参与度', '焦虑度', '狂热值', '竞拍动能', '稀缺性', '在场率'],
     datasets: [{
       label: '当前情绪维度',
-      data: [rd.engagement, rd.anxiety, rd.frenzy, rd.competitiveness, rd.priceMomentum, rd.participation],
+      data: [rd.engagement, rd.anxiety, rd.frenzy, rd.momentum, rd.scarcity, rd.participation],
       fill: true,
       backgroundColor: 'rgba(124, 58, 237, 0.3)',
       borderColor: 'rgba(167, 139, 250, 1)',
@@ -241,6 +249,10 @@ function updateRadarChart(rd) {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        animation: {
+          duration: 500,
+          easing: 'easeOutQuart'
+        },
         plugins: {
           legend: { display: false }
         },

@@ -337,6 +337,48 @@ body {
   margin-top: 4px;
 }
 
+.heat-factor-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.factor-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.6), rgba(51, 65, 85, 0.3));
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.factor-icon {
+  font-size: 24px;
+}
+
+.factor-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.factor-name {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.factor-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: #a78bfa;
+  font-family: 'Courier New', monospace;
+}
+
 .emotion-breakdown {
   margin-bottom: 24px;
 }

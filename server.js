@@ -2,12 +2,186 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const Redis = require('ioredis');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const STREAM_KEY = 'auction:bids';
+const CONSUMER_GROUP = 'auction_processors';
+const PROCESSED_SET_KEY = 'auction:processed_bids';
+const CONSUMER_NAME = `consumer_${process.pid}_${Date.now()}`;
+
+let redisAvailable = false;
+let redisClient = null;
+let redisConsumer = null;
+
+function initRedis() {
+  try {
+    redisClient = new Redis(REDIS_URL, { lazyConnect: true, enableReadyCheck: false, maxRetriesPerRequest: 1 });
+    redisConsumer = new Redis(REDIS_URL, { lazyConnect: true, enableReadyCheck: false, maxRetriesPerRequest: 1 });
+
+    redisClient.on('connect', () => {
+      redisAvailable = true;
+      console.log('✅ Redis 连接成功');
+      initConsumerGroup().catch(console.error);
+    });
+    redisClient.on('error', (err) => {
+      if (redisAvailable) {
+        console.log('❌ Redis 连接断开，降级为内存模式:', err.message);
+        redisAvailable = false;
+      }
+    });
+    redisConsumer.on('error', (err) => {
+      // 静默消费端错误
+    });
+
+    redisClient.connect().catch(() => {
+      console.log('⚠️  Redis 不可用，运行在内存模式');
+      redisAvailable = false;
+    });
+    redisConsumer.connect().catch(() => {});
+  } catch (e) {
+    console.log('⚠️  Redis 初始化失败，运行在内存模式');
+    redisAvailable = false;
+  }
+}
+
+async function initConsumerGroup() {
+  if (!redisAvailable) return;
+  try {
+    await redisClient.xgroup('CREATE', STREAM_KEY, CONSUMER_GROUP, '0', 'MKSTREAM');
+  } catch (err) {
+    if (err.message.includes('unknown command')) {
+      console.log('⚠️  当前Redis不支持Streams，降级为内存模式');
+      redisAvailable = false;
+      return;
+    }
+    if (!err.message.includes('BUSYGROUP')) {
+      console.error('创建消费者组失败:', err.message);
+    }
+  }
+}
+
+async function publishBidToStream(bidData) {
+  if (!redisAvailable) return null;
+  try {
+    const id = await redisClient.xadd(STREAM_KEY, '*',
+      'bidId', bidData.bidId,
+      'amount', bidData.amount,
+      'timestamp', bidData.timestamp,
+      'source', bidData.source
+    );
+    return id;
+  } catch (e) {
+    if (e.message.includes('unknown command')) {
+      console.log('⚠️  Redis不支持Streams命令，降级为内存模式');
+      redisAvailable = false;
+    }
+    return null;
+  }
+}
+
+async function isBidProcessed(bidId) {
+  if (!redisAvailable) return false;
+  try {
+    const result = await redisClient.sismember(PROCESSED_SET_KEY, bidId);
+    return result === 1;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function markBidProcessed(bidId) {
+  if (!redisAvailable) return;
+  try {
+    await redisClient.multi()
+      .sadd(PROCESSED_SET_KEY, bidId)
+      .expire(PROCESSED_SET_KEY, 86400)
+      .exec();
+  } catch (e) {
+    console.debug('标记已处理失败:', e.message);
+  }
+}
+
+let processingSet = new Set();
+
+async function processBidIdempotent(bidId, bidAmount, source) {
+  if (processingSet.has(bidId)) {
+    console.log(`⚠️  本地去重: bid ${bidId} 正在处理中`);
+    return false;
+  }
+  processingSet.add(bidId);
+
+  try {
+    if (redisAvailable) {
+      const alreadyProcessed = await isBidProcessed(bidId);
+      if (alreadyProcessed) {
+        console.log(`⚠️  Redis去重: bid ${bidId} 已被处理`);
+        return false;
+      }
+    }
+
+    hall.processNewBid(bidAmount);
+    broadcastStatus();
+
+    if (redisAvailable) {
+      await markBidProcessed(bidId);
+    }
+
+    return true;
+  } catch (e) {
+    console.error('处理出价失败:', e);
+    return false;
+  } finally {
+    processingSet.delete(bidId);
+  }
+}
+
+async function startStreamConsumer() {
+  if (!redisAvailable) return;
+
+  const consume = async () => {
+    if (!redisAvailable) return;
+    try {
+      const results = await redisConsumer.xreadgroup(
+        'GROUP', CONSUMER_GROUP, CONSUMER_NAME,
+        'COUNT', 5,
+        'BLOCK', 1000,
+        'NOACK',
+        'STREAMS', STREAM_KEY, '>'
+      );
+
+      if (results && results.length > 0) {
+        for (const [stream, messages] of results) {
+          for (const [msgId, fields] of messages) {
+            const obj = {};
+            for (let i = 0; i < fields.length; i += 2) {
+              obj[fields[i]] = fields[i + 1];
+            }
+            if (obj.bidId && obj.amount) {
+              await processBidIdempotent(obj.bidId, parseFloat(obj.amount), obj.source || 'stream');
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (redisAvailable) console.debug('消费Stream出错:', e.message);
+    }
+    setTimeout(consume, 500);
+  };
+
+  consume();
+  console.log('📡 Redis Streams 消费者已启动');
+}
+
+function generateBidId() {
+  return `bid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
 
 const TOTAL_BIDDERS = 100;
 const BIDDER_NAMES = [
@@ -131,9 +305,19 @@ class AuctionHall {
     this.bidHistory = [];
     this.nextExitCandidate = null;
     this.heatIndex = 0;
+    this.smoothedHeatIndex = 0;
     this.lastBidderId = null;
     this.roundCount = 0;
     this.activeBidCount = 0;
+
+    this.bidVelocityHistory = [];
+    this.cumulativeMomentum = 0;
+    this.allTimeAvgPrice = 100000;
+    this.totalPriceSum = 100000;
+    this.scarcityFactor = 1.0;
+
+    this.emaAlpha = 0.2;
+
     this.initBidders();
     this.timestamp = Date.now();
   }
@@ -147,12 +331,23 @@ class AuctionHall {
 
   processNewBid(incomingPrice) {
     this.roundCount++;
+    const prevPrice = this.currentPrice;
     this.currentPrice = incomingPrice;
     this.priceHistory.push({ time: Date.now(), price: incomingPrice });
     if (this.priceHistory.length > 100) this.priceHistory.shift();
 
+    const velocity = prevPrice > 0 ? (incomingPrice - prevPrice) / prevPrice : 0;
+    this.bidVelocityHistory.push({ time: Date.now(), velocity: velocity * 100 });
+    if (this.bidVelocityHistory.length > 20) this.bidVelocityHistory.shift();
+
+    this.totalPriceSum += incomingPrice;
+    this.allTimeAvgPrice = this.totalPriceSum / this.roundCount;
+    this.scarcityFactor = incomingPrice / this.allTimeAvgPrice;
+
+    this.calculateCumulativeMomentum();
+
     const activeBidders = this.bidders.filter(b => b.active);
-    activeBidders.forEach(b => b.updateEmotion(incomingPrice, this.heatIndex));
+    activeBidders.forEach(b => b.updateEmotion(incomingPrice, this.smoothedHeatIndex));
 
     let highestBid = incomingPrice;
     let highestBidder = null;
@@ -185,7 +380,7 @@ class AuctionHall {
     this.calculateHeatIndex();
     this.predictNextExit();
     this.recordEmotionBreakdown();
-    this.heatHistory.push({ time: Date.now(), heat: this.heatIndex });
+    this.heatHistory.push({ time: Date.now(), heat: Math.round(this.smoothedHeatIndex) });
     if (this.heatHistory.length > 100) this.heatHistory.shift();
 
     return {
@@ -198,6 +393,25 @@ class AuctionHall {
     };
   }
 
+  calculateCumulativeMomentum() {
+    const recent = this.bidVelocityHistory.slice(-10);
+    if (recent.length === 0) {
+      this.cumulativeMomentum = 0;
+      return;
+    }
+
+    let weightedSum = 0;
+    let weightTotal = 0;
+    for (let i = 0; i < recent.length; i++) {
+      const weight = i + 1;
+      weightedSum += recent[i].velocity * weight;
+      weightTotal += weight;
+    }
+
+    const avgVelocity = weightedSum / weightTotal;
+    this.cumulativeMomentum = Math.min(100, Math.max(0, avgVelocity * 15));
+  }
+
   calculateHeatIndex() {
     const activeCount = this.bidders.filter(b => b.active).length;
     const activeRatio = activeCount / TOTAL_BIDDERS;
@@ -205,20 +419,27 @@ class AuctionHall {
     const emotions = this.getEmotionBreakdown();
     const engagementScore = (emotions.engaged * 0.5 + emotions.anxious * 0.8 + emotions.desperate * 1.0 + emotions.breakthrough * 1.2) / TOTAL_BIDDERS * 100;
 
-    const recentBids = this.bidHistory.slice(-5);
-    const bidMomentum = recentBids.length >= 3 ? Math.min(100, recentBids.length * 20) : 0;
-
     const avgFrenzy = this.bidders.reduce((sum, b) => sum + (b.active ? b.frenzyLevel : 0), 0) / Math.max(1, activeCount);
 
-    const priceVelocity = this.calculatePriceVelocity();
+    const scarcityScore = Math.min(100, Math.max(0, (this.scarcityFactor - 0.8) * 150));
 
-    this.heatIndex = Math.min(100, Math.max(0,
-      engagementScore * 0.30 +
-      bidMomentum * 0.25 +
+    const momentumScore = this.cumulativeMomentum;
+
+    const rawHeat = Math.min(100, Math.max(0,
+      engagementScore * 0.25 +
+      momentumScore * 0.25 +
       avgFrenzy * 0.20 +
-      priceVelocity * 0.15 +
+      scarcityScore * 0.20 +
       activeRatio * 100 * 0.10
     ));
+
+    this.heatIndex = rawHeat;
+
+    if (this.roundCount === 1) {
+      this.smoothedHeatIndex = rawHeat;
+    } else {
+      this.smoothedHeatIndex = this.emaAlpha * rawHeat + (1 - this.emaAlpha) * this.smoothedHeatIndex;
+    }
   }
 
   calculatePriceVelocity() {
@@ -293,8 +514,10 @@ class AuctionHall {
       engagement: ((emotions.engaged + emotions.anxious) / totalActive * 100).toFixed(0),
       anxiety: ((emotions.anxious + emotions.desperate) / totalActive * 100).toFixed(0),
       frenzy: (this.bidders.reduce((s, b) => s + (b.active ? b.frenzyLevel : 0), 0) / totalActive).toFixed(0),
-      competitiveness: Math.min(100, this.bidHistory.length * 3).toFixed(0),
-      priceMomentum: this.calculatePriceVelocity().toFixed(0),
+      competitiveness: this.cumulativeMomentum.toFixed(0),
+      momentum: this.cumulativeMomentum.toFixed(0),
+      scarcity: Math.min(100, (this.scarcityFactor * 60)).toFixed(0),
+      priceMomentum: this.cumulativeMomentum.toFixed(0),
       participation: (totalActive / TOTAL_BIDDERS * 100).toFixed(0)
     };
   }
@@ -302,7 +525,11 @@ class AuctionHall {
   getStatus() {
     return {
       currentPrice: this.currentPrice,
-      heatIndex: Math.round(this.heatIndex),
+      heatIndex: Math.round(this.smoothedHeatIndex),
+      rawHeatIndex: Math.round(this.heatIndex),
+      cumulativeMomentum: Math.round(this.cumulativeMomentum),
+      scarcityFactor: this.scarcityFactor.toFixed(3),
+      allTimeAvgPrice: Math.round(this.allTimeAvgPrice),
       activeBidders: this.bidders.filter(b => b.active).length,
       totalBidders: TOTAL_BIDDERS,
       roundCount: this.roundCount,
@@ -326,6 +553,11 @@ class AuctionHall {
 }
 
 const hall = new AuctionHall();
+initRedis();
+
+setTimeout(() => {
+  startStreamConsumer().catch(console.error);
+}, 2000);
 
 function broadcastStatus() {
   const status = JSON.stringify({ type: 'status', data: hall.getStatus() });
@@ -336,26 +568,52 @@ function broadcastStatus() {
   });
 }
 
-setInterval(() => {
+setInterval(async () => {
   const baseIncrease = hall.currentPrice * (0.02 + Math.random() * 0.05);
   const newBid = Math.floor(hall.currentPrice + baseIncrease);
-  hall.processNewBid(newBid);
-  broadcastStatus();
+  const bidId = generateBidId();
+
+  if (redisAvailable) {
+    await publishBidToStream({
+      bidId: bidId,
+      amount: newBid,
+      timestamp: Date.now(),
+      source: 'auto_auctioneer'
+    });
+  } else {
+    await processBidIdempotent(bidId, newBid, 'auto_auctioneer');
+  }
 }, 5000);
 
 wss.on('connection', (ws) => {
   console.log('新客户端连接');
   ws.send(JSON.stringify({ type: 'status', data: hall.getStatus() }));
 
-  ws.on('message', (message) => {
+  ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message);
       if (data.type === 'manualBid' && data.amount > hall.currentPrice) {
-        hall.processNewBid(data.amount);
-        broadcastStatus();
+        const bidId = generateBidId();
+        if (redisAvailable) {
+          await publishBidToStream({
+            bidId: bidId,
+            amount: data.amount,
+            timestamp: Date.now(),
+            source: 'manual'
+          });
+        } else {
+          await processBidIdempotent(bidId, data.amount, 'manual');
+        }
       }
       if (data.type === 'reset') {
         Object.assign(hall, new AuctionHall());
+        if (redisAvailable) {
+          try {
+            await redisClient.del(PROCESSED_SET_KEY);
+            await redisClient.del(STREAM_KEY);
+            await initConsumerGroup();
+          } catch (e) {}
+        }
         broadcastStatus();
       }
     } catch (e) {
