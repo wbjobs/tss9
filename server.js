@@ -318,8 +318,13 @@ class AuctionHall {
 
     this.emaAlpha = 0.2;
 
+    this.bayesPrediction = null;
+    this.predictionHistory = [];
+    this.BAYES_BINS = 60;
+
     this.initBidders();
     this.timestamp = Date.now();
+    this.runBayesianPrediction();
   }
 
   initBidders() {
@@ -380,6 +385,7 @@ class AuctionHall {
     this.calculateHeatIndex();
     this.predictNextExit();
     this.recordEmotionBreakdown();
+    this.runBayesianPrediction();
     this.heatHistory.push({ time: Date.now(), heat: Math.round(this.smoothedHeatIndex) });
     if (this.heatHistory.length > 100) this.heatHistory.shift();
 
@@ -452,6 +458,174 @@ class AuctionHall {
     }
     velocity = (velocity / (prices.length - 1)) * 1000;
     return Math.min(100, Math.max(0, velocity));
+  }
+
+  runBayesianPrediction() {
+    const activeBidders = this.bidders.filter(b => b.active);
+    if (activeBidders.length === 0) {
+      this.bayesPrediction = null;
+      return;
+    }
+
+    const sortedBudgets = activeBidders.map(b => b.budgetCap).sort((a, b) => a - b);
+    const minPrice = this.currentPrice;
+    const maxBudget = sortedBudgets[sortedBudgets.length - 1];
+    const topBudgets = sortedBudgets.slice(-Math.ceil(sortedBudgets.length * 0.1));
+    const avgTopBudget = topBudgets.reduce((s, v) => s + v, 0) / topBudgets.length;
+    const maxPrice = Math.max(minPrice * 2.5, avgTopBudget * 1.1);
+
+    const bins = this.BAYES_BINS;
+    const binSize = (maxPrice - minPrice) / bins;
+    const binCenters = [];
+    for (let i = 0; i < bins; i++) {
+      binCenters.push(minPrice + binSize * (i + 0.5));
+    }
+
+    const prior = this.computePrior(binCenters, activeBidders);
+    const likelihood = this.computeLikelihood(binCenters);
+    const posterior = new Array(bins).fill(0);
+
+    let sumPosterior = 0;
+    for (let i = 0; i < bins; i++) {
+      posterior[i] = prior[i] * likelihood[i];
+      sumPosterior += posterior[i];
+    }
+
+    if (sumPosterior < 1e-12) {
+      this.bayesPrediction = null;
+      return;
+    }
+    for (let i = 0; i < bins; i++) {
+      posterior[i] /= sumPosterior;
+    }
+
+    let expectedValue = 0;
+    for (let i = 0; i < bins; i++) {
+      expectedValue += binCenters[i] * posterior[i];
+    }
+
+    let cumulative = 0;
+    let ciLow = binCenters[0];
+    let ciHigh = binCenters[bins - 1];
+    let modeIdx = 0;
+    let maxPosterior = 0;
+    for (let i = 0; i < bins; i++) {
+      cumulative += posterior[i];
+      if (cumulative >= 0.05 && ciLow === binCenters[0]) ciLow = binCenters[i];
+      if (cumulative >= 0.95 && ciHigh === binCenters[bins - 1]) ciHigh = binCenters[i];
+      if (posterior[i] > maxPosterior) {
+        maxPosterior = posterior[i];
+        modeIdx = i;
+      }
+    }
+
+    let totalVar = 0;
+    for (let i = 0; i < bins; i++) {
+      totalVar += posterior[i] * Math.pow(binCenters[i] - expectedValue, 2);
+    }
+    const stdDev = Math.sqrt(totalVar);
+
+    const uncertainty = (ciHigh - ciLow) / Math.max(1, expectedValue);
+
+    this.bayesPrediction = {
+      expectedPrice: Math.round(expectedValue),
+      modePrice: Math.round(binCenters[modeIdx]),
+      ciLow: Math.round(ciLow),
+      ciHigh: Math.round(ciHigh),
+      stdDev: Math.round(stdDev),
+      uncertainty: (uncertainty * 100).toFixed(1),
+      bins: binCenters.map(p => Math.round(p)),
+      pdf: posterior.map(v => parseFloat(v.toFixed(6))),
+      pdfMax: parseFloat(maxPosterior.toFixed(6))
+    };
+
+    this.predictionHistory.push({
+      round: this.roundCount,
+      time: Date.now(),
+      currentPrice: this.currentPrice,
+      expectedPrice: this.bayesPrediction.expectedPrice,
+      ciLow: this.bayesPrediction.ciLow,
+      ciHigh: this.bayesPrediction.ciHigh,
+      modePrice: this.bayesPrediction.modePrice,
+      uncertainty: this.bayesPrediction.uncertainty
+    });
+
+    if (this.predictionHistory.length > 200) {
+      this.predictionHistory.shift();
+    }
+  }
+
+  computePrior(binCenters, activeBidders) {
+    const bins = binCenters.length;
+    const prior = new Array(bins).fill(0);
+    const frenzyWeights = activeBidders.map(b => 0.5 + (b.frenzyLevel / 100) * 1.5);
+
+    for (let i = 0; i < bins; i++) {
+      const price = binCenters[i];
+      let weightSum = 0;
+      for (let j = 0; j < activeBidders.length; j++) {
+        const bidder = activeBidders[j];
+        const cap = bidder.budgetCap;
+        if (price <= cap) {
+          const ratio = price / cap;
+          let survival = 1.0;
+          if (ratio < 0.7) survival = 1.0;
+          else if (ratio < 0.9) survival = 1.0 - (ratio - 0.7) * 2;
+          else survival = 0.6 * Math.exp(-(ratio - 0.9) * 15);
+          survival *= frenzyWeights[j];
+          weightSum += survival;
+        }
+      }
+      prior[i] = weightSum / activeBidders.length;
+    }
+
+    const topCaps = activeBidders.map(b => b.budgetCap).sort((a, b) => b - a).slice(0, 10);
+    const meanTop = topCaps.reduce((s, v) => s + v, 0) / topCaps.length;
+    const stdTop = Math.sqrt(topCaps.reduce((s, v) => s + Math.pow(v - meanTop, 2), 0) / topCaps.length) || meanTop * 0.3;
+    for (let i = 0; i < bins; i++) {
+      const price = binCenters[i];
+      const gauss = Math.exp(-0.5 * Math.pow((price - meanTop) / stdTop, 2));
+      prior[i] = prior[i] * 0.6 + gauss * 0.4;
+    }
+
+    let sum = prior.reduce((s, v) => s + v, 0);
+    if (sum > 0) for (let i = 0; i < bins; i++) prior[i] /= sum;
+    return prior;
+  }
+
+  computeLikelihood(binCenters) {
+    const bins = binCenters.length;
+    const likelihood = new Array(bins).fill(0);
+    const curr = this.currentPrice;
+
+    const totalRounds = Math.max(1, this.roundCount);
+    const priceGrowthRatio = totalRounds >= 2 ? curr / Math.max(1, this.allTimeAvgPrice) : 1.0;
+
+    const momentum = this.cumulativeMomentum / 100;
+    const meanShift = curr * (1 + 0.02 * momentum + 0.005 * (priceGrowthRatio - 1) * totalRounds);
+    const scale = curr * (0.15 + 0.10 * (1 - momentum));
+
+    for (let i = 0; i < bins; i++) {
+      const price = binCenters[i];
+      if (price < curr * 1.001) {
+        likelihood[i] = 1e-8;
+        continue;
+      }
+      const z = (price - meanShift) / scale;
+      let laplace = Math.exp(-Math.abs(z) * 1.2) / (2 * scale);
+
+      const activeRatio = this.bidders.filter(b => b.active).length / TOTAL_BIDDERS;
+      if (activeRatio < 0.3) {
+        const tailDecay = Math.exp(-Math.max(0, (price - curr) / (curr * 0.2)) * 2);
+        laplace *= (0.4 + 0.6 * tailDecay);
+      }
+
+      likelihood[i] = Math.max(1e-8, laplace);
+    }
+
+    let sum = likelihood.reduce((s, v) => s + v, 0);
+    if (sum > 0) for (let i = 0; i < bins; i++) likelihood[i] /= sum;
+    return likelihood;
   }
 
   getEmotionBreakdown() {
@@ -544,6 +718,8 @@ class AuctionHall {
         title: this.bidders[this.lastBidderId].title,
         emotion: this.bidders[this.lastBidderId].emotionState
       } : null,
+      bayesPrediction: this.bayesPrediction,
+      predictionHistory: this.predictionHistory.slice(-30),
       priceHistory: this.priceHistory.slice(-50),
       heatHistory: this.heatHistory.slice(-50),
       emotionBreakdownHistory: this.emotionBreakdownHistory.slice(-50),

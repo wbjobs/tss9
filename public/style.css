@@ -645,6 +645,105 @@ body {
 .tag-desperate { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
 .tag-breakthrough { background: rgba(124, 58, 237, 0.2); color: #a78bfa; }
 
+.bayes-panel {
+  margin-top: 20px;
+  padding: 18px;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(124, 58, 237, 0.15));
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 12px;
+}
+
+.bayes-panel h3 {
+  font-size: 14px;
+  margin-bottom: 14px;
+  color: #d1d5db;
+}
+
+.bayes-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.bayes-metric {
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+}
+
+.bm-label {
+  font-size: 10px;
+  color: #9ca3af;
+  margin-bottom: 3px;
+}
+
+.bm-value {
+  font-size: 18px;
+  font-weight: 800;
+  background: linear-gradient(90deg, #60a5fa, #a78bfa);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-family: 'Courier New', monospace;
+}
+
+.bayes-ci {
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+}
+
+.ci-label {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 8px;
+}
+
+.ci-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.ci-range > span {
+  font-size: 11px;
+  color: #fbbf24;
+  font-weight: 600;
+  font-family: 'Courier New', monospace;
+  min-width: 60px;
+}
+
+.ci-range > span:first-child { text-align: right; }
+
+.ci-bar {
+  flex: 1;
+  height: 10px;
+  background: rgba(30, 41, 59, 0.8);
+  border-radius: 5px;
+  overflow: hidden;
+  position: relative;
+}
+
+.ci-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899);
+  border-radius: 5px;
+  transition: width 0.5s ease;
+}
+
+.ci-uncertainty {
+  font-size: 11px;
+  color: #9ca3af;
+  text-align: right;
+}
+
+.ci-uncertainty span {
+  color: #f87171;
+  font-weight: 700;
+}
+
 @media (max-width: 1200px) {
   .main-grid { grid-template-columns: 1fr; }
   .panel.wide { grid-column: span 1; }

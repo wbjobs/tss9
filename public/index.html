@@ -137,6 +137,29 @@
           <div class="empty-state-sm">分析中...</div>
         </div>
       </div>
+
+      <div class="bayes-panel">
+        <h3>🎯 成交价预测（贝叶斯）</h3>
+        <div class="bayes-metrics">
+          <div class="bayes-metric">
+            <div class="bm-label">期望成交价</div>
+            <div class="bm-value" id="bayesExpected">--</div>
+          </div>
+          <div class="bayes-metric">
+            <div class="bm-label">众数（最可能）</div>
+            <div class="bm-value" id="bayesMode">--</div>
+          </div>
+        </div>
+        <div class="bayes-ci">
+          <div class="ci-label">90% 置信区间</div>
+          <div class="ci-range">
+            <span id="ciLow">--</span>
+            <div class="ci-bar"><div class="ci-fill" id="ciFill"></div></div>
+            <span id="ciHigh">--</span>
+          </div>
+          <div class="ci-uncertainty">不确定度: <span id="ciUncertainty">--</span></div>
+        </div>
+      </div>
     </section>
 
     <section class="panel charts-panel wide">
@@ -149,6 +172,16 @@
           <h3>📈 价格 & 热度时间趋势</h3>
           <canvas id="lineChart"></canvas>
         </div>
+      </div>
+    </section>
+
+    <section class="panel wide">
+      <div class="panel-header">
+        <h2>📊 贝叶斯后验概率密度分布</h2>
+        <div class="timer" id="peakSharpness">峰值尖锐度: --</div>
+      </div>
+      <div class="chart-box">
+        <canvas id="pdfChart"></canvas>
       </div>
     </section>
 

@@ -102,10 +102,12 @@ function updateDashboard(data) {
   updateFactorCards(data);
   updateEmotionBars(data.emotionBreakdown, data.totalBidders);
   updateExitCandidate(data.nextExitCandidate);
+  updateBayesPrediction(data.bayesPrediction);
   updateBidList(data.recentBids);
   updateBiddersGrid(data.topBidders);
   updateRadarChart(data.radarData);
   updateLineChart(data.priceHistory, data.heatHistory);
+  updatePdfChart(data.bayesPrediction, data.currentPrice);
 }
 
 function updateHeatGauge(heat) {
@@ -129,6 +131,32 @@ function updateFactorCards(data) {
   document.getElementById('scarcityValue').textContent = (data.scarcityFactor || '1.000') + 'x';
   const avg = data.allTimeAvgPrice || 100000;
   document.getElementById('avgPriceValue').textContent = avg >= 10000 ? (avg / 10000).toFixed(1) + '万' : avg;
+}
+
+function updateBayesPrediction(pred) {
+  if (!pred) {
+    document.getElementById('bayesExpected').textContent = '--';
+    document.getElementById('bayesMode').textContent = '--';
+    document.getElementById('ciLow').textContent = '--';
+    document.getElementById('ciHigh').textContent = '--';
+    document.getElementById('ciFill').style.width = '0%';
+    document.getElementById('ciUncertainty').textContent = '--';
+    document.getElementById('peakSharpness').textContent = '峰值尖锐度: --';
+    return;
+  }
+
+  const fmt = v => v >= 10000 ? (v / 10000).toFixed(1) + '万' : v.toLocaleString('zh-CN');
+  document.getElementById('bayesExpected').textContent = '¥ ' + fmt(pred.expectedPrice);
+  document.getElementById('bayesMode').textContent = '¥ ' + fmt(pred.modePrice);
+  document.getElementById('ciLow').textContent = fmt(pred.ciLow);
+  document.getElementById('ciHigh').textContent = fmt(pred.ciHigh);
+  document.getElementById('ciUncertainty').textContent = pred.uncertainty + '%';
+
+  const ciWidth = Math.max(10, Math.min(100, 100 - parseFloat(pred.uncertainty)));
+  document.getElementById('ciFill').style.width = ciWidth + '%';
+
+  const sharpness = pred.pdfMax ? (pred.pdfMax * 100).toFixed(2) + '%' : '--';
+  document.getElementById('peakSharpness').textContent = `峰值尖锐度: ${sharpness}`;
 }
 
 function updateEmotionBars(bd, total) {
@@ -362,6 +390,194 @@ function updateLineChart(priceHist, heatHist) {
     lineChart.data.datasets[0].data = prices;
     lineChart.data.datasets[1].data = heats;
     lineChart.update('none');
+  }
+}
+
+let pdfChart = null;
+function updatePdfChart(pred, currentPrice) {
+  const ctx = document.getElementById('pdfChart');
+  if (!ctx) return;
+  const canvasCtx = ctx.getContext('2d');
+
+  if (!pred || !pred.bins || pred.bins.length === 0) {
+    if (pdfChart) {
+      pdfChart.data.labels = [];
+      pdfChart.data.datasets.forEach(ds => ds.data = []);
+      pdfChart.update('none');
+    }
+    return;
+  }
+
+  const labels = pred.bins.map(p => p >= 10000 ? (p / 10000).toFixed(1) + '万' : p);
+  const pdfData = pred.pdf.map(v => v * 100);
+
+  const ciLowIdx = pred.bins.findIndex(b => b >= pred.ciLow);
+  const ciHighIdx = pred.bins.findLastIndex ? pred.bins.findLastIndex(b => b <= pred.ciHigh) : pred.bins.length - 1;
+
+  const bgColors = pred.bins.map((p, i) => {
+    if (p < currentPrice) return 'rgba(107, 114, 128, 0.15)';
+    if (p < pred.modePrice) {
+      const alpha = 0.3 + 0.5 * (i / pred.bins.length);
+      return `rgba(59, 130, 246, ${alpha})`;
+    } else {
+      const alpha = 0.7 - 0.5 * ((i - pred.bins.indexOf(pred.modePrice)) / pred.bins.length);
+      return `rgba(236, 72, 153, ${Math.max(0.2, alpha)})`;
+    }
+  });
+
+  const expectedIdx = pred.bins.reduce((best, p, i) =>
+    Math.abs(p - pred.expectedPrice) < Math.abs(pred.bins[best] - pred.expectedPrice) ? i : best, 0);
+
+  const data = {
+    labels: labels,
+    datasets: [
+      {
+        label: '概率密度 (%)',
+        data: pdfData,
+        fill: true,
+        backgroundColor: bgColors,
+        borderColor: 'rgba(167, 139, 250, 0.9)',
+        borderWidth: 2,
+        tension: 0.35,
+        pointRadius: 0,
+        pointHoverRadius: 4
+      }
+    ]
+  };
+
+  if (!pdfChart) {
+    pdfChart = new Chart(canvasCtx, {
+      type: 'line',
+      data: data,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: {
+          duration: 600,
+          easing: 'easeOutQuart'
+        },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#d1d5db' } },
+          tooltip: {
+            callbacks: {
+              title: (items) => '价格区间: ' + items[0].label,
+              label: (item) => '概率密度: ' + item.raw.toFixed(3) + '%'
+            }
+          },
+          annotation: {}
+        },
+        scales: {
+          x: {
+            ticks: {
+              color: '#9ca3af',
+              maxRotation: 0,
+              autoSkip: true,
+              maxTicksLimit: 10,
+              callback: function(val, idx) {
+                const allLabels = this.chart.data.labels;
+                const realIdx = typeof val === 'number' ? val : idx;
+                const label = allLabels[realIdx] || '';
+                const bin = pred.bins[realIdx];
+                if (bin === pred.modePrice) return '🎯 ' + label;
+                if (bin === pred.expectedPrice && realIdx !== pred.bins.indexOf(pred.modePrice)) return '📊 ' + label;
+                return label;
+              }
+            },
+            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            title: { display: true, text: '可能成交价 (¥)', color: '#60a5fa' }
+          },
+          y: {
+            beginAtZero: true,
+            ticks: {
+              color: '#f59e0b',
+              callback: v => v.toFixed(2) + '%'
+            },
+            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            title: { display: true, text: '概率密度 P(x)', color: '#f59e0b' }
+          }
+        }
+      },
+      plugins: [{
+        id: 'predictionAnnotations',
+        afterDraw(chart) {
+          const { ctx, chartArea: { top, bottom }, scales: { x, y } } = chart;
+          ctx.save();
+
+          const expectedX = x.getPixelForValue(expectedIdx);
+          if (expectedX !== null && !isNaN(expectedX)) {
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.9)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(expectedX, top);
+            ctx.lineTo(expectedX, bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#3b82f6';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.fillText('期望', expectedX + 4, top + 14);
+          }
+
+          const modeIdx = pred.bins.indexOf(pred.modePrice);
+          if (modeIdx >= 0) {
+            const modeX = x.getPixelForValue(modeIdx);
+            if (modeX !== null && !isNaN(modeX)) {
+              ctx.strokeStyle = 'rgba(236, 72, 153, 0.9)';
+              ctx.lineWidth = 2;
+              ctx.setLineDash([6, 4]);
+              ctx.beginPath();
+              ctx.moveTo(modeX, top);
+              ctx.lineTo(modeX, bottom);
+              ctx.stroke();
+              ctx.setLineDash([]);
+              ctx.fillStyle = '#ec4899';
+              ctx.font = 'bold 11px sans-serif';
+              ctx.fillText('众数', modeX + 4, top + 28);
+            }
+          }
+
+          if (ciLowIdx >= 0 && ciHighIdx >= 0 && ciHighIdx > ciLowIdx) {
+            const xLow = x.getPixelForValue(ciLowIdx);
+            const xHigh = x.getPixelForValue(ciHighIdx);
+            const bandY = bottom - 8;
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.25)';
+            ctx.fillRect(xLow, bandY - 6, Math.max(1, xHigh - xLow), 10);
+            ctx.strokeStyle = 'rgba(59, 130, 246, 0.8)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(xLow, bandY - 6, Math.max(1, xHigh - xLow), 10);
+            ctx.fillStyle = '#60a5fa';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('90% CI', (xLow + xHigh) / 2 - 20, bandY + 18);
+          }
+
+          const currIdx = pred.bins.findIndex(b => b >= currentPrice);
+          if (currIdx >= 0) {
+            const currX = x.getPixelForValue(currIdx);
+            if (currX !== null && !isNaN(currX)) {
+              ctx.strokeStyle = 'rgba(16, 185, 129, 0.9)';
+              ctx.lineWidth = 2;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(currX, top);
+              ctx.lineTo(currX, bottom);
+              ctx.stroke();
+              ctx.setLineDash([]);
+              ctx.fillStyle = '#10b981';
+              ctx.font = 'bold 11px sans-serif';
+              ctx.fillText('当前', currX + 4, bottom - 14);
+            }
+          }
+
+          ctx.restore();
+        }
+      }]
+    });
+  } else {
+    pdfChart.data.labels = labels;
+    pdfChart.data.datasets[0].data = pdfData;
+    pdfChart.data.datasets[0].backgroundColor = bgColors;
+    pdfChart.update('none');
   }
 }
 
